@@ -2,6 +2,7 @@
 
 namespace Mooc;
 
+use think\Exception;
 use Util\Curl;
 
 class Course extends Video
@@ -35,6 +36,11 @@ class Course extends Video
             }
         }
         //获取单元测试问题列表
+        preg_match_all('/examId=\d*;.*id=(\d*);.*name="(.*)";/',$resultStr,$data);
+        if(count($data[1]) == 2){
+            $result['bigQuiz'][] = ['id'=>[$data[1][1]],'name' => self::unicode_decode($data[2][1])];
+        }
+        //获取期末考试问题
         preg_match_all('/contentId=\d*;.*contentType=1;.*jsonContent="(.*)";.*name="(.*)"/', $resultStr, $data);
         $dataLength = count($data[1]);
         if ($dataLength != 0) {
@@ -56,12 +62,87 @@ class Course extends Video
     public function getCommentsList($courseID)
     {
         $resultStr = self::getBeanList($courseID);
-        preg_match_all('/contentId=(\d*);.*contentType=6;/', $resultStr, $data);
+        preg_match_all('/contentId=(\d*);.*contentType=6;.*id=(\d*);/', $resultStr, $data);
 
-        if (count($data[1]) != 0) {
-            return $data[1];
+        return [
+            'contentId' => $data[1],
+            'id'        => $data[2]
+        ];
+    }
+
+    /**
+     * 返回需要查看的文档列表
+     * @param $courseID
+     * @return array
+     */
+    public function getDocsList($courseID)
+    {
+        $resultStr = self::getBeanList($courseID);
+        preg_match_all('/contentId=(\d*);.*contentType=3;.*id=(\d*);/', $resultStr, $data);
+        return [
+            'contentId' => $data[1],
+            'id'        => $data[2]
+        ];
+    }
+
+    /**
+     * 返回文档页数
+     * @param $docsContentId
+     * @param $docsId
+     * @return int
+     */
+    public function getDocsPageCount($docsContentId, $docsId)
+    {
+        $curl = new Curl($this->baseUrl . '/dwr/call/plaincall/CourseBean.getLessonUnitLearnVo.dwr');
+        $curl->addHeader(['Cookie:' . $this->cookie]);
+        $curl->setRequestType('post');
+        $result = $curl->send(self::structRequestData([
+            'callCount'       => 1,
+            'scriptSessionId' => '${scriptSessionId}190',
+            'httpSessionId'   => $this->csrf,
+            'c0-scriptName'   => 'CourseBean',
+            'c0-methodName'   => 'getLessonUnitLearnVo',
+            'c0-id'           => 0,
+            'c0-param0'       => 'number:' . $docsContentId,
+            'c0-param1'       => 'number:3',
+            'c0-param2'       => 'number:0',
+            'c0-param3'       => 'number:' . $docsId,
+            'batchId'         => time()
+        ]));
+        preg_match('/textPages:(\d+?),/', $result, $data);
+
+        if (empty($data)) {
+            return 0;
         }
-        return [];
+        return intval($data[1]);
+    }
+
+    /**
+     * 保存查看文档记录
+     * @param $docsId
+     * @param $docsPageCount
+     * @return bool
+     */
+    public function saveDocsRecord($docsId, $docsPageCount)
+    {
+        return $this->saveContentLean([
+            'unitId'   => 'number:' . $docsId,
+            'pageNum'  => $docsPageCount,
+            'finished' => 'boolean:true'
+        ]);
+    }
+
+    /**
+     * 保存回复记录
+     * @param $replyId
+     * @return bool
+     */
+    public function saveReplyRecord($replyId)
+    {
+        return $this->saveContentLean([
+            'unitId'   => 'number:' . $replyId,
+            'finished' => 'boolean:true'
+        ]);
     }
 
     /**
@@ -131,27 +212,57 @@ class Course extends Video
 
     /**
      * 回复章节内容
-     * @param $commentID
+     * @param $replyContentId
+     * @param $replyID
      * @param $replyContent
      * @return bool
      */
-    public function commentReply($commentID, $replyContent)
+    public function commentReply($replyContentId,$replyID, $replyContent)
     {
         $curl = new Curl($this->baseUrl . '/dwr/call/plaincall/MocForumBean.addReply.dwr');
         $curl->addHeader(['Cookie:' . $this->cookie]);
         $curl->setRequestType('post');
-        $result = $curl->send(self::structRequestData([
+        $curl->send(self::structRequestData([
             'callCount'       => 1,
             'scriptSessionId' => '${scriptSessionId}190',
             'httpSessionId'   => $this->csrf,
             'c0-scriptName'   => 'MocForumBean',
             'c0-methodName'   => 'addReply',
             'c0-id'           => 0,
-            'c0-e1'=>'number:'.$commentID,
-            'c0-e2'=>'string:'.urlencode($replyContent),
-            'c0-e3'=>'number:0',
-            'c0-param0'=>'Object_Object:{postId:reference:c0-e1,content:reference:c0-e2,anonymous:reference:c0-e3}',
-            'c0-param1='=>'Array:[]',
+            'c0-e1'           => 'number:' . $replyContentId,
+            'c0-e2'           => 'string:' . urlencode($replyContent),
+            'c0-e3'           => 'number:0',
+            'c0-param0'       => 'Object_Object:{postId:reference:c0-e1,content:reference:c0-e2,anonymous:reference:c0-e3}',
+            'c0-param1='      => 'Array:[]',
+            'batchId'         => time()
+        ]));
+        $this->saveReplyRecord($replyID);
+        return true;
+    }
+
+    /**
+     * 保存学习记录
+     * @param array $data
+     * @return bool
+     */
+    private function saveContentLean($data = [])
+    {
+        $curl = new Curl($this->baseUrl . '/dwr/call/plaincall/CourseBean.saveMocContentLearn.dwr');
+        $curl->addHeader(['Cookie:' . $this->cookie]);
+        $curl->setRequestType('post');
+        $saveObj = '';
+        foreach ($data as $key => $value) {
+            $saveObj .= $key . ':' . $value . ',';
+        }
+        $saveObj = substr($saveObj, 0, strlen($saveObj) - 1);
+        $curl->send(self::structRequestData([
+            'callCount'       => 1,
+            'scriptSessionId' => '${scriptSessionId}190',
+            'httpSessionId'   => $this->csrf,
+            'c0-scriptName'   => 'CourseBean',
+            'c0-methodName'   => 'saveMocContentLearn',
+            'c0-id'           => 0,
+            'c0-param0'       => 'Object_Object:{' . $saveObj . '}',
             'batchId'         => time()
         ]));
         return true;
@@ -179,13 +290,16 @@ class Course extends Video
             'c0-param2'       => 'boolean:false',
             'batchId'         => time()
         ]));
+        preg_match('/aid:(\d+?),/', $result, $data);
+        //获取当前在做的试卷id 也有可能不存在
+        if(!empty($data[1])){
+            return $data[1];
+        }
+        //优先返回正在做的试卷id
         preg_match_all('/aid=(\d*)/', $result, $data);
+        //获取所有试卷id列表
         if (empty($data)) {
             return 0;
-        }
-        if(empty($data[1])){
-            preg_match('/aid:(\d+?),/', $result, $data);
-            return $data[1];
         }
         return $data[1][count($data[1]) - 1];
     }
@@ -198,7 +312,7 @@ class Course extends Video
     private function analyzeQuizAnswer($data)
     {
         preg_match_all('/plainTextTitle="(.*)";.*type=(\d+?);/isU', $data, $title);
-        preg_match_all('/answer=(.+?);.+?content="\<p(?:.*|)\>(.+?)\<\/p\>";/U', $data, $answer);
+        preg_match_all('/answer=(.+?);.+?content="(.+?)";/U', $data, $answer);
         if (empty($answer) || empty($title)) {
             return [];
         }
@@ -213,7 +327,6 @@ class Course extends Video
         $answerCounted  = 0;
         $answer2Counted = 0;
         $data           = [];
-
         for ($i = 0; $i < $titleLength; $i++) {
             $answerList = [];
             switch ($title[2][$i]) {
@@ -233,13 +346,15 @@ class Course extends Video
             for ($o = 0; $o < $answerLength; $o++) {
                 if ($answerLength == 2) {
                     $baseAddress = $answer2Counted + $o;
-                    if ($o == 1) {
+                    if ($o == 1 && $titleLength != 1 && $answer2Counted != 0) {
                         $baseAddress++;
                     }
-                    $answerList[] = [self::unicode_decode($answer2[2][$baseAddress]), $answer2[1][$baseAddress]];
-                } else {
+                    $answerList[] = [self::unicode_decode(strip_tags($answer2[2][$baseAddress])), $answer2[1][$baseAddress]];
+                    //一般为判断题两个答案选项
+                }else{
                     $baseAddress  = $answerCounted + $o;
-                    $answerList[] = [self::unicode_decode($answer[2][$baseAddress]), $answer[1][$baseAddress]];
+                    $answerList[] = [self::unicode_decode(strip_tags($answer[2][$baseAddress])), $answer[1][$baseAddress]];
+                    //一般为4个答案 的单选题或多选题
                 }
             }
             if ($answerLength == 2) {
